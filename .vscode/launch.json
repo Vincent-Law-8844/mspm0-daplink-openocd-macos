@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "MSPM0L1117 (DAPLink / OpenOCD)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "serverpath": "${workspaceFolder}/dist/openocd-macos-arm64-hid/bin/openocd-macos-arm64-hid",
+            "searchDir": [
+                "${workspaceFolder}/dist/openocd-macos-arm64-hid/share/openocd/scripts"
+            ],
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/ti_mspm0.cfg"
+            ],
+            "openOCDLaunchCommands": [
+                "adapter speed 2000"
+            ],
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/examples/gpio_toggle.out",
+            "gdbPath": "/opt/homebrew/bin/arm-none-eabi-gdb",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none",
+            "env": {
+                "OPENOCD_SCRIPTS": "${workspaceFolder}/dist/openocd-macos-arm64-hid/share/openocd/scripts"
+            }
+        }
+    ]
+}
