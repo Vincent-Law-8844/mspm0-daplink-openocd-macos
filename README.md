@@ -56,6 +56,23 @@ This is cosmetic: the driver reads `SRAMFLASH` and auto-configures 128 KB /
 16 KB / 2 banks. Flashing and verification work. See
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) for logs.
 
+### Performance
+
+Measured with a real 54,720-byte image on this MSPM0L1117 + MuseLab DAPLink:
+
+| Build | Flash + verify | Rate |
+|---|---|---|
+| Stock TI build | 110.9 s | 0.49 KiB/s |
+| Batched AP-write patch | 21.8 s | 2.45 KiB/s |
+
+`adapter speed` 2/4/8/12 MHz made no difference; the bottleneck is the HID USB
+round-trip, not the SWD clock. The patch is
+[`patches/mspm0-batch-ap-writes.patch`](patches/mspm0-batch-ap-writes.patch);
+details and the remaining limit are in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). The ready-to-send upstream issue
+draft is [`docs/UPSTREAM-REPORT.md`](docs/UPSTREAM-REPORT.md). The patch is
+tested on MSPM0L1117; review it before using it on other MSPM0 parts.
+
 ### Layout
 
 ```text
@@ -63,6 +80,7 @@ This is cosmetic: the driver reads `SRAMFLASH` and auto-configures 128 KB /
 ├── dist/openocd-macos-arm64-hid/
 │   ├── bin/openocd-macos-arm64-hid
 │   └── share/openocd/scripts/
+├── patches/mspm0-batch-ap-writes.patch
 ├── scripts/
 │   ├── flash.sh
 │   └── build-openocd-macos.sh
@@ -76,6 +94,8 @@ This is cosmetic: the driver reads `SRAMFLASH` and auto-configures 128 KB /
 │   ├── ti-openocd-47bf607.tar.gz
 │   └── jimtcl-1933e545.tar.gz
 ├── docs/VERIFICATION.md
+├── docs/PERFORMANCE.md
+├── docs/UPSTREAM-REPORT.md
 ├── README.md
 ├── SOURCE.md
 ├── LICENSE
@@ -143,6 +163,9 @@ The script clones TI `ti-openocd` at `47bf607` and builds with
   `OPENOCD_SCRIPTS` or pass `-s`.
 - Only one OpenOCD can own the DAPLink at a time, and both OpenOCD instances
   default to GDB port `3333`.
+- **Do not keep the DAPLink CDC UART open while flashing.** It can make the
+  MSPM0 lose the debug AP and require a mass erase. `scripts/flash.sh` refuses
+  to run if a `/dev/cu.usbmodem*` port is already open.
 - With TI clang ≤ 4.0.3, if breakpoints do not bind, run:
   `tiarmobjcopy --set-section-type=.TI.phattrs=1 your.out`.
   The 4.0.2 build used here works without it.
@@ -200,6 +223,22 @@ Unidentified PART[0xaf6c]/variant[0xb0], unknown DeviceID[0xbbb4]. Attempting to
 这只是名称识别没跟上，不影响烧录：驱动会读 `SRAMFLASH`，自动配置
 128 KB / 16 KB / 2 bank。实测日志见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md)。
 
+### 烧录速度
+
+用 54,720 字节的真实固件实测（MSPM0L1117 + MuseLab DAPLink）：
+
+| 版本 | 烧录 + 校验 | 速度 |
+|---|---|---|
+| TI 原版 | 110.9 s | 0.49 KiB/s |
+| 批量 AP 写补丁 | 21.8 s | 2.45 KiB/s |
+
+`adapter speed` 2/4/8/12 MHz 对时间没有影响，瓶颈是 HID USB 往返延迟，不是 SWD
+时钟。补丁在
+[`patches/mspm0-batch-ap-writes.patch`](patches/mspm0-batch-ap-writes.patch)，
+详细分析和剩余上限见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)，可直接发给
+OpenOCD 作者的 issue 草稿见 [`docs/UPSTREAM-REPORT.md`](docs/UPSTREAM-REPORT.md)。
+补丁只在 MSPM0L1117 上验证过，其他型号使用前请先 review。
+
 ### 目录
 
 ```text
@@ -207,6 +246,7 @@ Unidentified PART[0xaf6c]/variant[0xb0], unknown DeviceID[0xbbb4]. Attempting to
 ├── dist/openocd-macos-arm64-hid/
 │   ├── bin/openocd-macos-arm64-hid
 │   └── share/openocd/scripts/
+├── patches/mspm0-batch-ap-writes.patch
 ├── scripts/
 │   ├── flash.sh
 │   └── build-openocd-macos.sh
@@ -220,6 +260,8 @@ Unidentified PART[0xaf6c]/variant[0xb0], unknown DeviceID[0xbbb4]. Attempting to
 │   ├── ti-openocd-47bf607.tar.gz
 │   └── jimtcl-1933e545.tar.gz
 ├── docs/VERIFICATION.md
+├── docs/PERFORMANCE.md
+├── docs/UPSTREAM-REPORT.md
 ├── README.md
 ├── SOURCE.md
 ├── LICENSE
@@ -284,6 +326,9 @@ brew install autoconf automake libtool pkg-config
   `OPENOCD_SCRIPTS` 或加 `-s`。
 - 同一个 DAPLink 同时只能被一个 OpenOCD 占用，两个 OpenOCD 也都默认使用
   GDB 端口 `3333`。
+- **烧录时不要同时打开 DAPLink 的 UART 串口。** 否则可能导致 MSPM0 掉 AP，
+  只能 mass erase 恢复。`scripts/flash.sh` 检测到 `/dev/cu.usbmodem*` 被占用时
+  会直接拒绝烧录。
 - 如果使用 TI clang ≤ 4.0.3，断点不生效时可以给 `.out` 补一步：
   `tiarmobjcopy --set-section-type=.TI.phattrs=1 your.out`。
   这里用的 4.0.2 实测不需要。

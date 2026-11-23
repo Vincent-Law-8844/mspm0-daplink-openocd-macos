@@ -68,3 +68,11 @@ pc             0xc8                0xc8 <main+8>
 ## 5. 备份
 
 测试前已把主 flash 的 128 KB 原始内容备份为 `private/backup_flash.bin`（被 `.gitignore` 忽略，不随仓库上传）。
+
+
+## 6. 批量 AP 写补丁
+
+原版：`program ... verify reset exit` 110.91 s；补丁版：21.82 s / 21.81 s（两次），
+均 `Verified OK`。Cortex-Debug 的 GDB `load` 路径 22.27 s，断点停在 `main`。
+
+瓶颈和补丁细节见 `docs/PERFORMANCE.md`。

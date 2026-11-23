@@ -36,6 +36,17 @@ fi
 git -C "$SRC" checkout -f "$COMMIT"
 git -C "$SRC" submodule update --init --depth 1 jimtcl
 
+PATCH="$ROOT/patches/mspm0-batch-ap-writes.patch"
+if git -C "$SRC" apply --check "$PATCH" 2>/dev/null; then
+    git -C "$SRC" apply "$PATCH"
+    echo "== applied mspm0 batch AP write patch"
+elif git -C "$SRC" apply --reverse --check "$PATCH" 2>/dev/null; then
+    echo "== mspm0 batch AP write patch already applied"
+else
+    echo "ERROR: could not apply $PATCH" >&2
+    exit 1
+fi
+
 cd "$SRC"
 BREW_PREFIX=$(brew --prefix 2>/dev/null || echo /opt/homebrew)
 export ACLOCAL_PATH="$BREW_PREFIX/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"

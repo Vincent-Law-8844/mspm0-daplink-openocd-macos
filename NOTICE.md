@@ -6,6 +6,7 @@ This repository redistributes a prebuilt OpenOCD binary for macOS arm64.
 - Source used: Texas Instruments `ti-openocd` fork,
   <https://github.com/TexasInstruments/ti-openocd>
 - Exact commit: `47bf6076181862fe3d7509f4aa49c27dc10f7730`
+- Local patch: `patches/mspm0-batch-ap-writes.patch` (MSPM0 AP-write batching)
 - Build configuration (macOS arm64):
 
 ```text
@@ -15,10 +16,11 @@ This repository redistributes a prebuilt OpenOCD binary for macOS arm64.
   --disable-doxygen-html --disable-werror
 ```
 
-No source changes were made for this build; only the configure options differ from
-TI's published macOS build (the important one being CMSIS-DAP HID support via
-`hidapi`). Exact source snapshots are in `source/`, and
-`scripts/build-openocd-macos.sh` reproduces the build from upstream git.
+This build uses TI's source plus one local patch,
+`patches/mspm0-batch-ap-writes.patch`, to batch MSPM0 flash command writes.
+Exact upstream source snapshots are in `source/`, and
+`scripts/build-openocd-macos.sh` reproduces the build from upstream git and
+applies the patch.
 
 The MSPM0 target and flash support (`tcl/target/ti_mspm0.cfg`,
 `src/flash/nor/mspm0.c`) come from the same TI fork and remain under GPLv2.

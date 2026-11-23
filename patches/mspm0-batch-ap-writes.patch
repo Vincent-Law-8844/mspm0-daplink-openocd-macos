@@ -1,0 +1,241 @@
+diff --git a/src/flash/nor/mspm0.c b/src/flash/nor/mspm0.c
+index 266b0c1..664dfac 100644
+--- a/src/flash/nor/mspm0.c
++++ b/src/flash/nor/mspm0.c
+@@ -16,6 +16,8 @@
+ #include "imp.h"
+ #include <helper/bits.h>
+ #include <helper/time_support.h>
++#include <target/arm_adi_v5.h>
++#include <target/cortex_m.h>
+ 
+ /* MSPM0 Region memory map */
+ #define MSPM0_FLASH_BASE_NONMAIN        0x41C00000
+@@ -98,6 +100,7 @@ struct mspm0_flash_bank {
+ 	unsigned int data_flash_size_kb;
+ 	unsigned int main_flash_size_kb;
+ 	unsigned int main_flash_num_banks;
++	unsigned int exec_upper_bank;
+ 	unsigned int sector_size;
+ 	/* Decoded SRAM information */
+ 	unsigned int sram_size_kb;
+@@ -403,6 +406,11 @@ static int mspm0_read_part_info(struct flash_bank *bank)
+ 		LOG_ERROR("Failed to read sramflash register");
+ 		return retval;
+ 	}
++	uint32_t sysctl_sec_status = 0;
++	if (target_read_u32(target, SYSCTL_SECCFG_SECSTATUS, &sysctl_sec_status) == ERROR_OK)
++		mspm0_info->exec_upper_bank = mspm0_extract_val(sysctl_sec_status, 12, 12);
++	else
++		mspm0_info->exec_upper_bank = 0;
+ 	uint32_t flashdesc;
+ 	retval = target_read_u32(target, FCTL_REG_DESC, &flashdesc);
+ 	if (retval != ERROR_OK) {
+@@ -556,28 +564,19 @@ static int mspm0_fctl_get_sector_reg(struct flash_bank *bank, unsigned int addr,
+ 	unsigned int *reg, unsigned int *sector_mask)
+ {
+ 	struct mspm0_flash_bank *mspm0_info = bank->driver_priv;
+-	struct target *target = bank->target;
+ 	int ret = ERROR_OK;
+ 	unsigned int sector_num = (addr >> 10);
+ 	unsigned int sector_in_bank = sector_num;
+ 	unsigned int phys_sector_num = sector_num;
+-	uint32_t sysctl_sec_status;
+-	unsigned int exec_upper_bank;
+ 
+ 	/*
+ 	 * If the device has dual banks we will need to check if it is configured
+-	 * to execute from the upper bank. In the scenario that we are executing
+-	 * from upper bank then we will need to protect it using CMDWEPROTA rather
+-	 * than CMDWEPROTB. We also need to take into account what sector
+-	 * we're using when going between banks.
++	 * to execute from the upper bank. The bank select is cached during probe
++	 * so this path performs no target transactions.
+ 	 */
+ 	if (mspm0_info->main_flash_num_banks > 1 &&
+ 		bank->base == MSPM0_FLASH_BASE_MAIN) {
+-		ret = target_read_u32(target, SYSCTL_SECCFG_SECSTATUS, &sysctl_sec_status);
+-		if (ret != ERROR_OK)
+-			return ret;
+-		exec_upper_bank = mspm0_extract_val(sysctl_sec_status, 12, 12);
+-		if (exec_upper_bank) {
++		if (mspm0_info->exec_upper_bank) {
+ 			if (sector_num > (mspm0_info->main_flash_size_kb / 2)) {
+ 				phys_sector_num =
+ 					sector_num - (mspm0_info->main_flash_size_kb / 2);
+@@ -900,6 +899,90 @@ static int mspm0_erase(struct flash_bank *bank, unsigned int first, unsigned int
+ 	return retval;
+ }
+ 
++
++static int mspm0_queue_reg(struct adiv5_ap *ap, uint32_t addr, uint32_t value)
++{
++	struct adiv5_dap *dap = ap->dap;
++	int retval;
++
++	retval = dap_queue_ap_write(ap, MEM_AP_REG_TAR(dap), addr);
++	if (retval == ERROR_OK)
++		retval = dap_queue_ap_write(ap, MEM_AP_REG_DRW(dap), value);
++	return retval;
++}
++
++static int mspm0_queue_regs(struct adiv5_ap *ap, uint32_t addr,
++		const uint32_t *values, unsigned int count)
++{
++	struct adiv5_dap *dap = ap->dap;
++	int retval;
++
++	retval = dap_queue_ap_write(ap, MEM_AP_REG_TAR(dap), addr);
++	for (unsigned int i = 0; i < count && retval == ERROR_OK; i++)
++		retval = dap_queue_ap_write(ap, MEM_AP_REG_DRW(dap), values[i]);
++	return retval;
++}
++
++/*
++ * Program one MSPM0 flash word.  The command registers are queued as a single
++ * DAP transfer instead of one USB round-trip per register; with a HID CMSIS-DAP
++ * probe this is the difference between ~16 ms and a few ms per 8-byte word.
++ */
++static int mspm0_program_word(struct flash_bank *bank, unsigned int addr,
++		const unsigned char *buffer, unsigned int num_bytes,
++		unsigned int protect_reg, uint32_t protect_mask,
++		bool write_cmdtype, bool write_byteen, uint32_t *status)
++{
++	struct cortex_m_common *cortex_m = target_to_cm(bank->target);
++	struct adiv5_ap *ap = cortex_m->armv7m.debug_ap;
++	uint32_t data0 = 0;
++	uint32_t data1 = 0;
++	uint32_t bytes_en;
++	int retval;
++
++	if (!ap) {
++		LOG_ERROR("MSPM0 flash write: no MEM-AP");
++		return ERROR_FAIL;
++	}
++
++	for (unsigned int i = 0; i < num_bytes && i < 4; i++)
++		data0 |= (uint32_t)buffer[i] << (8 * i);
++	for (unsigned int i = 4; i < num_bytes; i++)
++		data1 |= (uint32_t)buffer[i] << (8 * (i - 4));
++
++	bytes_en = (1u << num_bytes) - 1;
++	bytes_en |= BIT(8);	/* ECC chunk for one 64-bit flash word */
++
++	if (write_cmdtype)
++		retval = mspm0_queue_reg(ap, FCTL_REG_CMDTYPE,
++				FCTL_CMDTYPE_COMMAND_PROGRAM | FCTL_CMDTYPE_SIZE_ONEWORD);
++	else
++		retval = ERROR_OK;
++	if (retval == ERROR_OK && write_byteen) {
++		uint32_t addr_bytes[2] = { addr, bytes_en };
++		retval = mspm0_queue_regs(ap, FCTL_REG_CMDADDR, addr_bytes, 2);
++	}
++	if (retval == ERROR_OK)
++		retval = mspm0_queue_reg(ap, protect_reg, ~protect_mask);
++	if (retval == ERROR_OK) {
++		uint32_t data[2] = { data0, data1 };
++		retval = mspm0_queue_regs(ap, FCTL_REG_CMDDATA0, data,
++				num_bytes > 4 ? 2 : 1);
++	}
++	if (retval == ERROR_OK)
++		retval = mspm0_queue_reg(ap, FCTL_REG_CMDEXEC, FCTL_CMDEXEC_VAL_EXECUTE);
++	if (retval == ERROR_OK && status) {
++		struct adiv5_dap *dap = ap->dap;
++		retval = dap_queue_ap_write(ap, MEM_AP_REG_TAR(dap), FCTL_REG_STATCMD);
++		if (retval == ERROR_OK)
++			retval = dap_queue_ap_read(ap, MEM_AP_REG_DRW(dap), status);
++	}
++	if (retval == ERROR_OK)
++		retval = dap_run(ap->dap);
++
++	return retval;
++}
++
+ static int mspm0_write(struct flash_bank *bank, const unsigned char *buffer,
+ 	unsigned int offset, unsigned int count)
+ {
+@@ -943,65 +1026,49 @@ static int mspm0_write(struct flash_bank *bank, const unsigned char *buffer,
+ 
+ 	/* Add proper memory offset for bank being written to */
+ 	unsigned int addr = bank->base + offset;
++	bool cmdtype_written = false;
+ 
+ 	while (count) {
+ 		unsigned int num_bytes_to_write;
+-		uint32_t bytes_en;
++		unsigned int protect_reg;
++		uint32_t protect_mask;
+ 
+ 		/*
+ 		 * If count is not 64 bit aligned, we will do byte wise op to keep things simple
+ 		 * Usually this might mean we need to additional write ops towards
+ 		 * trailing edge, but that is a tiny penalty for image downloads.
+-		 * NOTE: we are going to assume the device does not support multi-word
+-		 * programming - there does not seem to be discoverability!
+ 		 */
+ 		if (count < mspm0_info->flash_word_size_bytes)
+ 			num_bytes_to_write = count;
+ 		else
+ 			num_bytes_to_write = mspm0_info->flash_word_size_bytes;
+ 
+-		/* Data bytes to write */
+-		bytes_en = (1 << num_bytes_to_write) - 1;
+-		/* ECC chunks to write */
+-		switch (mspm0_info->flash_word_size_bytes) {
+-		case 8:
+-			bytes_en |= BIT(8);
+-			break;
+-		case 16:
+-			bytes_en |= BIT(16);
+-			bytes_en |= (num_bytes_to_write > 8) ? BIT(17) : 0;
+-			break;
+-		default:
+-			LOG_ERROR("Invalid flash_word_size_bytes %d",
+-				mspm0_info->flash_word_size_bytes);
+-			return ERROR_FAIL;
+-		}
+-
+-		retval = mspm0_fctl_cfg_command(bank, addr,
+-			(FCTL_CMDTYPE_COMMAND_PROGRAM | FCTL_CMDTYPE_SIZE_ONEWORD),
+-			bytes_en);
++		retval = mspm0_fctl_get_sector_reg(bank, addr, &protect_reg, &protect_mask);
+ 		if (retval != ERROR_OK)
+ 			return retval;
+ 
+-		retval = mspm0_fctl_unprotect_sector(bank, addr);
+-		if (retval != ERROR_OK)
+-			return retval;
++		bool write_cmdtype = !cmdtype_written;
++		bool write_byteen = true;
+ 
+-		retval = target_write_buffer(target, FCTL_REG_CMDDATA0, num_bytes_to_write, buffer);
++		uint32_t status = 0;
++		retval = mspm0_program_word(bank, addr, buffer, num_bytes_to_write,
++				protect_reg, protect_mask, write_cmdtype, write_byteen, &status);
+ 		if (retval != ERROR_OK)
+ 			return retval;
+ 
++		/* The status read is part of the same DAP transfer; if the flash
++		 * command has already completed, skip the extra poll round-trip. */
++		if ((status & FCTL_STATCMD_CMDDONE_MASK) != FCTL_STATCMD_CMDDONE_STATDONE ||
++			(status & FCTL_STATCMD_CMDPASS_MASK) != FCTL_STATCMD_CMDPASS_STATPASS) {
++			retval = mspm0_fctl_wait_cmd_ok(bank);
++			if (retval != ERROR_OK)
++				return retval;
++		}
++
++		cmdtype_written = true;
+ 		addr += num_bytes_to_write;
+ 		buffer += num_bytes_to_write;
+ 		count -= num_bytes_to_write;
+-
+-		retval = target_write_u32(target, FCTL_REG_CMDEXEC, FCTL_CMDEXEC_VAL_EXECUTE);
+-		if (retval != ERROR_OK)
+-			return retval;
+-
+-		retval = mspm0_fctl_wait_cmd_ok(bank);
+-		if (retval != ERROR_OK)
+-			return retval;
+ 	}
+ 
+ 	/*
